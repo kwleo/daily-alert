@@ -1,20 +1,30 @@
 """
 텔레그램 지출 관리 봇
 사용법: "카드 45000 스타벅스" 또는 "현금 12000 편의점"
-명령어: /summary, /history, /delete
+명령어: /summary, /history, /delete, /help
 """
-import asyncio
 import asyncpg
 import os
 import re
 import ssl
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
-DATABASE_URL = os.environ["DATABASE_URL"]
+BOT_TOKEN        = os.environ["TELEGRAM_BOT_TOKEN"]
+DATABASE_URL     = os.environ["DATABASE_URL"]
 ALLOWED_CHAT_IDS = set(map(int, os.environ["ALLOWED_CHAT_IDS"].split(",")))
+
+
+def clean_db_url(url):
+    """asyncpg용으로 sslmode, channel_binding 파라미터 제거"""
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    params.pop("sslmode", None)
+    params.pop("channel_binding", None)
+    clean_query = urlencode({k: v[0] for k, v in params.items()})
+    return urlunparse(parsed._replace(query=clean_query))
 
 
 async def init_db(pool):
@@ -167,7 +177,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(application: Application):
-    db_url = DATABASE_URL.replace("?sslmode=require", "").replace("&sslmode=require", "")
+    db_url = clean_db_url(DATABASE_URL)
     ssl_ctx = ssl.create_default_context()
     pool = await asyncpg.create_pool(db_url, ssl=ssl_ctx)
     await init_db(pool)
