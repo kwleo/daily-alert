@@ -23,8 +23,8 @@ DATABASE_URL     = os.environ["DATABASE_URL"]
 ALLOWED_CHAT_IDS = set(map(int, os.environ["ALLOWED_CHAT_IDS"].split(",")))
 
 MEMBER_NAMES = {
-    7182419728: "LEO",
-    7706672156: "JANE",
+    7182419728: "건우",
+    7706672156: "혜연",
 }
 
 
@@ -119,6 +119,8 @@ async def handle_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     emoji = "💳" if payment_type == "카드" else "💵"
     now = datetime.now()
+    weekdays = ["월", "화", "수", "목", "금", "토", "일"]
+    date_str = f"{now.month}/{now.day} ({weekdays[now.weekday()]})"
     label = f"{card_issuer} 카드" if card_issuer else "현금"
     desc_str = f" ({description})" if description else ""
     sender_name = MEMBER_NAMES.get(chat_id, user_name)
@@ -126,7 +128,7 @@ async def handle_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 보내는 사람에게 확인 메시지
     await update.message.reply_text(
         f"{emoji} 기록 완료\n"
-        f"  {label} {amount:,}원{desc_str}\n\n"
+        f"  {date_str} {label} {amount:,}원{desc_str}\n\n"
         f"👤 {sender_name} {now.month}월 누적: {my_total:,}원\n"
         f"🏠 가계 {now.month}월 합계: {total:,}원"
     )
@@ -134,11 +136,10 @@ async def handle_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 상대방에게 알림
     other_id = next((uid for uid in MEMBER_NAMES if uid != chat_id), None)
     if other_id:
-        other_name = MEMBER_NAMES[other_id]
         await context.bot.send_message(
             chat_id=other_id,
             text=(
-                f"{emoji} {sender_name}이 {label} {amount:,}원 사용했어요{desc_str}\n\n"
+                f"{emoji} {sender_name}이 {date_str} {label} {amount:,}원 사용했어요{desc_str}\n\n"
                 f"👤 {sender_name} {now.month}월 누적: {my_total:,}원\n"
                 f"🏠 가계 {now.month}월 합계: {total:,}원"
             )
