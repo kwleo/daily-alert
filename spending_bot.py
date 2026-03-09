@@ -7,11 +7,12 @@
 명령어: /summary, /history, /delete, /help
 """
 import asyncpg
+import calendar
 import os
 import re
 import ssl
 import threading
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 from telegram import Update
@@ -20,6 +21,11 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 BOT_TOKEN        = os.environ["TELEGRAM_BOT_TOKEN"]
 DATABASE_URL     = os.environ["DATABASE_URL"]
 ALLOWED_CHAT_IDS = set(map(int, os.environ["ALLOWED_CHAT_IDS"].split(",")))
+
+MEMBER_NAMES = {
+    7182419728: "LEO",
+    7706672156: "JANE",
+}
 
 
 def clean_db_url(url):
@@ -115,13 +121,28 @@ async def handle_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
     label = f"{card_issuer} 카드" if card_issuer else "현금"
     desc_str = f" ({description})" if description else ""
+    sender_name = MEMBER_NAMES.get(chat_id, user_name)
 
+    # 보내는 사람에게 확인 메시지
     await update.message.reply_text(
         f"{emoji} 기록 완료\n"
         f"  {label} {amount:,}원{desc_str}\n\n"
-        f"👤 {user_name} {now.month}월 누적: {my_total:,}원\n"
+        f"👤 {sender_name} {now.month}월 누적: {my_total:,}원\n"
         f"🏠 가계 {now.month}월 합계: {total:,}원"
     )
+
+    # 상대방에게 알림
+    other_id = next((uid for uid in MEMBER_NAMES if uid != chat_id), None)
+    if other_id:
+        other_name = MEMBER_NAMES[other_id]
+        await context.bot.send_message(
+            chat_id=other_id,
+            text=(
+                f"{emoji} {sender_name}이 {label} {amount:,}원 사용했어요{desc_str}\n\n"
+                f"👤 {sender_name} {now.month}월 누적: {my_total:,}원\n"
+                f"🏠 가계 {now.month}월 합계: {total:,}원"
+            )
+        )
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -244,12 +265,63 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
+    """매월 말일 21:00 KST (12:00 UTC)에 월간 리포트 발송"""
+    now = datetime.now()
+    last_day = calendar.monthrange(now.year, now.month)[1]
+    if now.day != last_day:
+        return
+
+    pool = context.bot_data["pool"]
+
+    async with pool.acquire() as conn:
+        per_person = await conn.fetch(
+            """SELECT user_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM expenses
+               WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
+               GROUP BY user_name
+               ORDER BY total DESC"""
+        )
+        per_type = await conn.fetch(
+            """SELECT payment_type, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM expenses
+               WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
+               GROUP BY payment_type"""
+        )
+        total = await conn.fetchval(
+            """SELECT COALESCE(SUM(amount), 0) FROM expenses
+               WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())"""
+        )
+
+    if not per_person:
+        return
+
+    lines = [f"📅 {now.year}년 {now.month}월 결산 리포트\n"]
+
+    lines.append("👥 개인별")
+    for row in per_person:
+        lines.append(f"  👤 {row['user_name']}: {row['total']:,}원 ({row['cnt']}건)")
+
+    lines.append("\n결제수단별")
+    for row in per_type:
+        emoji = "💳" if row["payment_type"] == "카드" else "💵"
+        lines.append(f"  {emoji} {row['payment_type']}: {row['total']:,}원 ({row['cnt']}건)")
+
+    lines.append(f"\n💰 이달 총 지출: {total:,}원")
+
+    report = "\n".join(lines)
+    for chat_id in MEMBER_NAMES:
+        await context.bot.send_message(chat_id=chat_id, text=report)
+
+
 async def post_init(application: Application):
     db_url = clean_db_url(DATABASE_URL)
     ssl_ctx = ssl.create_default_context()
     pool = await asyncpg.create_pool(db_url, ssl=ssl_ctx)
     await init_db(pool)
     application.bot_data["pool"] = pool
+    # 매일 21:00 KST (12:00 UTC) 말일 체크
+    application.job_queue.run_daily(monthly_report_job, time=dt_time(12, 0, 0))
     print("DB 연결 완료, 봇 시작!")
 
 
