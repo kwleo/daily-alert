@@ -1,6 +1,9 @@
 """
 텔레그램 지출 관리 봇
-사용법: "카드 45000 스타벅스" 또는 "현금 12000 편의점"
+사용법:
+  카드: "농협 카드 4500"  (카드사 + 카드 + 금액)
+  현금: "현금 3000"       (금액)
+  메모 추가도 가능: "농협 카드 4500 스타벅스"
 명령어: /summary, /history, /delete, /help
 """
 import asyncpg
@@ -35,17 +38,41 @@ async def init_db(pool):
                 chat_id      BIGINT NOT NULL,
                 user_name    TEXT,
                 payment_type TEXT NOT NULL,
+                card_issuer  TEXT,
                 amount       INTEGER NOT NULL,
                 description  TEXT,
                 created_at   TIMESTAMP DEFAULT NOW()
             )
         """)
+        # 기존 테이블에 card_issuer 컬럼 없으면 추가
+        await conn.execute("""
+            ALTER TABLE expenses ADD COLUMN IF NOT EXISTS card_issuer TEXT
+        """)
 
 
 def parse_expense(text):
-    match = re.match(r'^(카드|현금)\s+(\d+)\s*(.*)$', text.strip())
-    if match:
-        return match.group(1), int(match.group(2)), match.group(3).strip() or None
+    """
+    카드: "농협 카드 4500" 또는 "농협 카드 4500 스타벅스"
+    현금: "현금 3000"     또는 "현금 3000 편의점"
+    금액에 쉼표 허용: "농협 카드 4,500"
+    """
+    text = text.strip()
+
+    # 현금
+    cash = re.match(r'^현금\s+(\d[\d,]*)\s*(.*)$', text)
+    if cash:
+        amount = int(cash.group(1).replace(',', ''))
+        description = cash.group(2).strip() or None
+        return "현금", None, amount, description
+
+    # 카드: "카드사 카드 금액 [메모]"
+    card = re.match(r'^(.+?)\s+카드\s+(\d[\d,]*)\s*(.*)$', text)
+    if card:
+        card_issuer = card.group(1).strip()
+        amount = int(card.group(2).replace(',', ''))
+        description = card.group(3).strip() or None
+        return "카드", card_issuer, amount, description
+
     return None
 
 
@@ -58,25 +85,40 @@ async def handle_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not parsed:
         return
 
-    payment_type, amount, description = parsed
+    payment_type, card_issuer, amount, description = parsed
     user_name = update.effective_user.first_name
     pool = context.bot_data["pool"]
 
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO expenses (chat_id, user_name, payment_type, amount, description) VALUES ($1, $2, $3, $4, $5)",
-            chat_id, user_name, payment_type, amount, description
+            """INSERT INTO expenses
+               (chat_id, user_name, payment_type, card_issuer, amount, description)
+               VALUES ($1, $2, $3, $4, $5, $6)""",
+            chat_id, user_name, payment_type, card_issuer, amount, description
         )
+        # 개인 이번 달 누적
+        my_total = await conn.fetchval(
+            """SELECT COALESCE(SUM(amount), 0) FROM expenses
+               WHERE chat_id = $1
+               AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())""",
+            chat_id
+        )
+        # 가계 이번 달 합계
         total = await conn.fetchval(
-            "SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())"
+            """SELECT COALESCE(SUM(amount), 0) FROM expenses
+               WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())"""
         )
 
     emoji = "💳" if payment_type == "카드" else "💵"
     now = datetime.now()
+    label = f"{card_issuer} 카드" if card_issuer else "현금"
+    desc_str = f" ({description})" if description else ""
+
     await update.message.reply_text(
         f"{emoji} 기록 완료\n"
-        f"  {payment_type} {amount:,}원 ({description or '-'})\n\n"
-        f"📊 {now.month}월 누적 지출: {total:,}원"
+        f"  {label} {amount:,}원{desc_str}\n\n"
+        f"👤 {user_name} {now.month}월 누적: {my_total:,}원\n"
+        f"🏠 가계 {now.month}월 합계: {total:,}원"
     )
 
 
@@ -88,25 +130,40 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
+        per_person = await conn.fetch(
+            """SELECT user_name, SUM(amount) AS total, COUNT(*) AS cnt
+               FROM expenses
+               WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
+               GROUP BY user_name
+               ORDER BY total DESC"""
+        )
+        per_type = await conn.fetch(
             """SELECT payment_type, SUM(amount) AS total, COUNT(*) AS cnt
                FROM expenses
                WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
                GROUP BY payment_type"""
         )
         total = await conn.fetchval(
-            "SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())"
+            """SELECT COALESCE(SUM(amount), 0) FROM expenses
+               WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())"""
         )
 
-    if not rows:
+    if not per_person:
         await update.message.reply_text(f"📊 {now.month}월 지출 내역이 없어요.")
         return
 
     lines = [f"📊 {now.year}년 {now.month}월 지출 요약\n"]
-    for row in rows:
+
+    lines.append("👥 개인별")
+    for row in per_person:
+        lines.append(f"  👤 {row['user_name']}: {row['total']:,}원 ({row['cnt']}건)")
+
+    lines.append("\n결제수단별")
+    for row in per_type:
         emoji = "💳" if row["payment_type"] == "카드" else "💵"
-        lines.append(f"{emoji} {row['payment_type']}: {row['total']:,}원 ({row['cnt']}건)")
-    lines.append(f"\n💰 합계: {total:,}원")
+        lines.append(f"  {emoji} {row['payment_type']}: {row['total']:,}원 ({row['cnt']}건)")
+
+    lines.append(f"\n💰 가계 합계: {total:,}원")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -119,7 +176,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT user_name, payment_type, amount, description, created_at
+            """SELECT user_name, payment_type, card_issuer, amount, description, created_at
                FROM expenses
                WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
                ORDER BY created_at DESC
@@ -134,8 +191,9 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in rows:
         emoji = "💳" if row["payment_type"] == "카드" else "💵"
         date = row["created_at"].strftime("%m/%d")
+        label = f"{row['card_issuer']} 카드" if row["card_issuer"] else "현금"
         desc = row["description"] or "-"
-        lines.append(f"{date} {emoji} {row['amount']:,}원  {desc}  ({row['user_name']})")
+        lines.append(f"{date} {emoji} {row['amount']:,}원  {label}  {desc}  ({row['user_name']})")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -144,19 +202,25 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id not in ALLOWED_CHAT_IDS:
         return
 
+    chat_id = update.effective_chat.id
     pool = context.bot_data["pool"]
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, payment_type, amount, description FROM expenses ORDER BY created_at DESC LIMIT 1"
+            """SELECT id, payment_type, card_issuer, amount, description
+               FROM expenses
+               WHERE chat_id = $1
+               ORDER BY created_at DESC LIMIT 1""",
+            chat_id
         )
         if not row:
             await update.message.reply_text("삭제할 내역이 없어요.")
             return
         await conn.execute("DELETE FROM expenses WHERE id = $1", row["id"])
 
+    label = f"{row['card_issuer']} 카드" if row["card_issuer"] else "현금"
     await update.message.reply_text(
-        f"🗑 삭제 완료\n{row['payment_type']} {row['amount']:,}원 ({row['description'] or '-'})"
+        f"🗑 삭제 완료\n{label} {row['amount']:,}원 ({row['description'] or '-'})"
     )
 
 
@@ -166,12 +230,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💬 사용법\n\n"
         "지출 입력:\n"
-        "  카드 45000 스타벅스\n"
-        "  현금 12000 편의점\n\n"
+        "  농협 카드 45000\n"
+        "  신한 카드 12000 스타벅스\n"
+        "  현금 8000\n"
+        "  현금 5000 편의점\n\n"
         "명령어:\n"
         "  /summary  이번 달 요약\n"
         "  /history  최근 10건 내역\n"
-        "  /delete   마지막 항목 삭제\n"
+        "  /delete   내 마지막 항목 삭제\n"
         "  /help     도움말"
     )
 
