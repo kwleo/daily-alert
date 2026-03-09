@@ -18,8 +18,8 @@ jobs:
       - name: Install dependencies
         run: pip install requests yfinance
 
-      - name: Send KakaoTalk alert
+      - name: Send Telegram alert
         env:
-          KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
-          KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python daily_alert_github.py
