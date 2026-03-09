@@ -292,6 +292,10 @@ async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
             """SELECT COALESCE(SUM(amount), 0) FROM expenses
                WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())"""
         )
+        prev_total = await conn.fetchval(
+            """SELECT COALESCE(SUM(amount), 0) FROM expenses
+               WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW() - INTERVAL '1 month')"""
+        )
 
     if not per_person:
         return
@@ -308,6 +312,14 @@ async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"  {emoji} {row['payment_type']}: {row['total']:,}원 ({row['cnt']}건)")
 
     lines.append(f"\n💰 이달 총 지출: {total:,}원")
+
+    if prev_total > 0:
+        diff = total - prev_total
+        pct = diff / prev_total * 100
+        arrow = "▲" if diff > 0 else "▼"
+        lines.append(f"📊 전월 대비: {arrow} {abs(diff):,}원 ({pct:+.1f}%)")
+    elif prev_total == 0:
+        lines.append("📊 전월 대비: 전월 데이터 없음")
 
     report = "\n".join(lines)
     for chat_id in MEMBER_NAMES:
