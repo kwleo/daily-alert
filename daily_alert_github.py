@@ -7,7 +7,7 @@ import yfinance as yf
 from datetime import datetime
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_CHAT_IDS  = [os.environ["TELEGRAM_CHAT_ID"], "7706672156"]
 
 
 def _ticker_data(symbol):
@@ -80,11 +80,12 @@ XRP
 
 
 def send_telegram(message):
-    resp = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        data={"chat_id": TELEGRAM_CHAT_ID, "text": message},
-    )
-    print("전송 결과:", resp.json())
+    for chat_id in TELEGRAM_CHAT_IDS:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": chat_id, "text": message},
+        )
+        print(f"전송 결과 ({chat_id}):", resp.json())
 
 
 if __name__ == "__main__":
