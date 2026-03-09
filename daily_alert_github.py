@@ -12,7 +12,7 @@ TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 def _ticker_data(symbol):
     t = yf.Ticker(symbol)
-    hist = t.history(period="2d")
+    hist = t.history(period="5d")
     close = hist["Close"].iloc[-1]
     prev  = hist["Close"].iloc[-2]
     chg   = close - prev
