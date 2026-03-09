@@ -22,12 +22,14 @@ import threading
 from datetime import datetime, date, time as dt_time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import google.generativeai as genai
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 BOT_TOKEN        = os.environ["TELEGRAM_BOT_TOKEN"]
 DATABASE_URL     = os.environ["DATABASE_URL"]
 ALLOWED_CHAT_IDS = set(map(int, os.environ["ALLOWED_CHAT_IDS"].split(",")))
+GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
 
 MEMBER_NAMES = {
     7182419728: "건우",
@@ -327,7 +329,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "지출 입력:\n"
         "  농협 카드 45000\n"
         "  신한 카드 12000 스타벅스\n"
-        "  현금 8000\n\n"
+        "  현금 8000\n"
+        "  📸 결제 알림 캡처 이미지 전송 (자동 인식)\n\n"
         "지출 명령어:\n"
         "  /summary  이번 달 요약\n"
         "  /history  최근 10건 내역\n"
@@ -337,6 +340,169 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /setrate 4.50  금리 변경\n\n"
         "  /help     도움말"
     )
+
+
+# ── 이미지 OCR ────────────────────────────────────────────────────
+def parse_gemini_response(text):
+    """Gemini 응답 텍스트에서 결제 정보 파싱"""
+    data = {}
+    for line in text.strip().split('\n'):
+        if ':' in line:
+            key, _, val = line.partition(':')
+            data[key.strip()] = val.strip()
+
+    try:
+        amount_str = data.get('금액', '').replace(',', '').replace('원', '').strip()
+        amount = int(amount_str)
+    except (ValueError, AttributeError):
+        return None
+
+    payment_type = data.get('결제수단', '').strip()
+    card_issuer  = data.get('카드사', '').strip() or None
+    description  = data.get('가맹점', '').strip() or None
+
+    if card_issuer in ('없음', 'N/A', '-', ''):
+        card_issuer = None
+    if description in ('없음', 'N/A', '-', ''):
+        description = None
+
+    if payment_type not in ('카드', '현금'):
+        payment_type = '카드' if card_issuer else '현금'
+
+    return payment_type, card_issuer, amount, description
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id not in ALLOWED_CHAT_IDS:
+        return
+
+    if not GEMINI_API_KEY:
+        await update.message.reply_text("❌ Gemini API 키가 설정되지 않았어요.")
+        return
+
+    await update.message.reply_text("🔍 이미지 분석 중...")
+
+    try:
+        photo = update.message.photo[-1]
+        photo_file = await photo.get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        prompt = (
+            "이 이미지는 카드 결제 알림, 은행 앱 푸시 알림, 또는 SMS 결제 문자입니다.\n"
+            "다음 정보를 추출해주세요.\n"
+            "반드시 아래 형식으로만 응답하고 다른 설명은 하지 마세요:\n\n"
+            "결제수단: 카드 또는 현금\n"
+            "카드사: (카드 결제인 경우 카드사/은행명, 없으면 없음)\n"
+            "금액: (숫자만, 원 단위)\n"
+            "가맹점: (가맹점 또는 상호명, 없으면 없음)"
+        )
+        image_blob = {"mime_type": "image/jpeg", "data": bytes(photo_bytes)}
+        response = model.generate_content([prompt, image_blob])
+        parsed = parse_gemini_response(response.text.strip())
+
+        if not parsed:
+            await update.message.reply_text(
+                "❌ 결제 정보를 인식하지 못했어요.\n\n직접 입력해주세요:\n예) 농협 카드 45000 스타벅스"
+            )
+            return
+
+        payment_type, card_issuer, amount, description = parsed
+        label    = f"{card_issuer} 카드" if card_issuer else "현금"
+        desc_str = f" ({description})" if description else ""
+
+        context.user_data["pending_expense"] = {
+            "payment_type": payment_type,
+            "card_issuer":  card_issuer,
+            "amount":       amount,
+            "description":  description,
+            "user_name":    update.effective_user.first_name,
+        }
+
+        keyboard = [[
+            InlineKeyboardButton("✅ 기록", callback_data="ocr_confirm"),
+            InlineKeyboardButton("❌ 취소", callback_data="ocr_cancel"),
+        ]]
+        await update.message.reply_text(
+            f"📸 인식된 내용:\n\n{label} {amount:,}원{desc_str}\n\n기록할까요?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ 오류 발생: {str(e)[:120]}")
+
+
+async def ocr_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    chat_id = update.effective_chat.id
+    await query.answer()
+
+    if query.data == "ocr_cancel":
+        context.user_data.pop("pending_expense", None)
+        await query.edit_message_text("❌ 취소되었어요.")
+        return
+
+    if query.data != "ocr_confirm":
+        return
+
+    pending = context.user_data.pop("pending_expense", None)
+    if not pending:
+        await query.edit_message_text("❌ 기록할 내용이 없어요. 이미지를 다시 보내주세요.")
+        return
+
+    payment_type = pending["payment_type"]
+    card_issuer  = pending["card_issuer"]
+    amount       = pending["amount"]
+    description  = pending["description"]
+    user_name    = pending["user_name"]
+
+    pool = context.bot_data["pool"]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO expenses
+               (chat_id, user_name, payment_type, card_issuer, amount, description)
+               VALUES ($1, $2, $3, $4, $5, $6)""",
+            chat_id, user_name, payment_type, card_issuer, amount, description
+        )
+        my_total = await conn.fetchval(
+            """SELECT COALESCE(SUM(amount), 0) FROM expenses
+               WHERE chat_id = $1
+               AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())""",
+            chat_id
+        )
+        total = await conn.fetchval(
+            """SELECT COALESCE(SUM(amount), 0) FROM expenses
+               WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())"""
+        )
+
+    emoji   = "💳" if payment_type == "카드" else "💵"
+    now     = datetime.now()
+    weekdays = ["월", "화", "수", "목", "금", "토", "일"]
+    date_str = f"{now.month}/{now.day} ({weekdays[now.weekday()]})"
+    label    = f"{card_issuer} 카드" if card_issuer else "현금"
+    desc_str = f" ({description})" if description else ""
+    sender_name = MEMBER_NAMES.get(chat_id, user_name)
+
+    await query.edit_message_text(
+        f"{emoji} 기록 완료\n"
+        f"  {date_str} {label} {amount:,}원{desc_str}\n\n"
+        f"👤 {sender_name} {now.month}월 누적: {my_total:,}원\n"
+        f"🏠 가계 {now.month}월 합계: {total:,}원"
+    )
+
+    other_id = next((uid for uid in MEMBER_NAMES if uid != chat_id), None)
+    if other_id:
+        await context.bot.send_message(
+            chat_id=other_id,
+            text=(
+                f"{emoji} {sender_name}이 {date_str} {label} {amount:,}원 사용했어요{desc_str}\n\n"
+                f"👤 {sender_name} {now.month}월 누적: {my_total:,}원\n"
+                f"🏠 가계 {now.month}월 합계: {total:,}원"
+            )
+        )
 
 
 # ── 대출 명령어 ───────────────────────────────────────────────────
@@ -667,6 +833,8 @@ def main():
     app.add_handler(CommandHandler("setrate",  setrate_command))
     app.add_handler(CommandHandler("help",     help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_expense))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(CallbackQueryHandler(ocr_callback, pattern="^ocr_"))
     app.run_polling()
 
 
