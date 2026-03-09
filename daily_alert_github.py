@@ -1,26 +1,13 @@
 """
 GitHub Actions용: 환경변수에서 토큰 읽어서 실행
 """
-import json
 import os
 import requests
 import yfinance as yf
 from datetime import datetime
 
-REST_API_KEY  = os.environ["KAKAO_REST_API_KEY"]
-REFRESH_TOKEN = os.environ["KAKAO_REFRESH_TOKEN"]
-
-
-def get_access_token():
-    resp = requests.post(
-        "https://kauth.kakao.com/oauth/token",
-        data={
-            "grant_type": "refresh_token",
-            "client_id": REST_API_KEY,
-            "refresh_token": REFRESH_TOKEN,
-        },
-    )
-    return resp.json()["access_token"]
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 
 def _ticker_data(symbol):
@@ -92,23 +79,16 @@ XRP
   ${d['xrp_close']:,.4f}  {arrow(d['xrp_chg'])} {abs(d['xrp_chg']):.4f} ({d['xrp_pct']:+.2f}%)"""
 
 
-def send_kakao(message, access_token):
-    payload = {
-        "object_type": "text",
-        "text": message,
-        "link": {"web_url": "", "mobile_web_url": ""},
-    }
+def send_telegram(message):
     resp = requests.post(
-        "https://kapi.kakao.com/v2/api/talk/memo/default/send",
-        headers={"Authorization": f"Bearer {access_token}"},
-        data={"template_object": json.dumps(payload)},
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        data={"chat_id": TELEGRAM_CHAT_ID, "text": message},
     )
     print("전송 결과:", resp.json())
 
 
 if __name__ == "__main__":
-    token = get_access_token()
-    data  = fetch_market_data()
-    msg   = format_message(data)
+    data = fetch_market_data()
+    msg  = format_message(data)
     print(msg)
-    send_kakao(msg, token)
+    send_telegram(msg)
