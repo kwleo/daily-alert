@@ -10,7 +10,9 @@ import asyncpg
 import os
 import re
 import ssl
+import threading
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -251,7 +253,23 @@ async def post_init(application: Application):
     print("DB 연결 완료, 봇 시작!")
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, *args):
+        pass  # 헬스체크 로그 억제
+
+
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", 8080), HealthHandler)
+    server.serve_forever()
+
+
 def main():
+    threading.Thread(target=run_health_server, daemon=True).start()
     app = (
         Application.builder()
         .token(BOT_TOKEN)
