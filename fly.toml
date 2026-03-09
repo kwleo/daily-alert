@@ -1,0 +1,9 @@
+app = "kwleo-spending-bot"
+primary_region = "nrt"
+
+[build]
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
